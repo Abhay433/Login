@@ -303,7 +303,7 @@ func (c *UserController) RefreshToken() {
 	}
 
 	// Verify refresh token (JWT)
-	claims, err := utils.VerifyJWT(req.RefreshToken)
+	claims, err := utils.VerifyRefreshJWT(req.RefreshToken)
 	if err != nil {
 		c.Ctx.Output.SetStatus(401)
 		c.Data["json"] = map[string]string{"error": "Invalid or expired refresh token"}
@@ -312,7 +312,7 @@ func (c *UserController) RefreshToken() {
 	}
 
 	// Extract user_id from claims
-	userIdFloat, ok := claims["user_id"].(float64) // jwt.MapClaims gives float64
+	userIdFloat, ok := claims["user_id"].(float64)
 	if !ok {
 		c.Ctx.Output.SetStatus(400)
 		c.Data["json"] = map[string]string{"error": "Invalid token claims"}
@@ -344,7 +344,7 @@ func (c *UserController) RefreshToken() {
 		return
 	}
 
-	// Generate new Access Token
+	// ✅ Generate new tokens
 	newAccessToken, err := utils.GenerateJWT(userId)
 	if err != nil {
 		c.Ctx.Output.SetStatus(500)
@@ -353,9 +353,96 @@ func (c *UserController) RefreshToken() {
 		return
 	}
 
-	// Return new access token
-	c.Data["json"] = dto.RefreshTokenResponse{
-		AccessToken: newAccessToken,
+	newRefreshToken, err := utils.GenerateRefreshJWT(userId) // NEW FUNCTION for long expiry
+	if err != nil {
+		c.Ctx.Output.SetStatus(500)
+		c.Data["json"] = map[string]string{"error": "Failed to generate new refresh token"}
+		c.ServeJSON()
+		return
 	}
+
+	// ✅ Update DB with new refresh token
+	tokenModel.Token = newRefreshToken
+	tokenModel.ExpiresAt = time.Now().Add(7 * 24 * time.Hour)
+	o.Update(&tokenModel)
+
+	// ✅ Return both tokens
+	c.Data["json"] = map[string]string{
+		"access_token":  newAccessToken,
+		"refresh_token": newRefreshToken,
+	}
+	c.ServeJSON()
+}
+
+// FORGOT PASSWORD
+func (c *UserController) ForgotPassword() {
+	var req dto.ForgotPasswordRequest
+	if err := json.NewDecoder(c.Ctx.Request.Body).Decode(&req); err != nil {
+		c.Ctx.Output.SetStatus(400)
+		c.Data["json"] = map[string]string{"error": "Invalid request body"}
+		c.ServeJSON()
+		return
+	}
+
+	o := orm.NewOrm()
+	user := models.Users{}
+	err := o.QueryTable("users").Filter("email", req.Email).One(&user)
+	if err == orm.ErrNoRows {
+		c.Ctx.Output.SetStatus(404)
+		c.Data["json"] = map[string]string{"error": "Email not found"}
+		c.ServeJSON()
+		return
+	}
+
+	// Generate reset token
+	token, _ := utils.GenerateResetToken()
+
+	resetToken := models.PasswordResetToken{
+		UserId:    user.Id,
+		Token:     token,
+		ExpiresAt: time.Now().Add(time.Hour), // 1 hour expiry
+	}
+	o.Insert(&resetToken)
+
+	// TODO: Send email with token link
+	// e.g., http://localhost:8080/reset-password?token=<token>
+
+	c.Data["json"] = map[string]string{"message": "Password reset link sent to your email"}
+	c.ServeJSON()
+}
+
+// RESET PASSWORD
+func (c *UserController) ResetPassword() {
+	var req dto.ResetPasswordRequest
+	if err := json.NewDecoder(c.Ctx.Request.Body).Decode(&req); err != nil {
+		c.Ctx.Output.SetStatus(400)
+		c.Data["json"] = map[string]string{"error": "Invalid request body"}
+		c.ServeJSON()
+		return
+	}
+
+	o := orm.NewOrm()
+	resetToken := models.PasswordResetToken{}
+	err := o.QueryTable("password_reset_tokens").
+		Filter("token", req.Token).
+		One(&resetToken)
+
+	if err == orm.ErrNoRows || resetToken.ExpiresAt.Before(time.Now()) {
+		c.Ctx.Output.SetStatus(401)
+		c.Data["json"] = map[string]string{"error": "Invalid or expired token"}
+		c.ServeJSON()
+		return
+	}
+
+	user := models.Users{Id: resetToken.UserId}
+	o.Read(&user)
+	hashed, _ := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	user.Password = string(hashed)
+	o.Update(&user)
+
+	// Optionally delete token after use
+	o.Delete(&resetToken)
+
+	c.Data["json"] = map[string]string{"message": "Password updated successfully"}
 	c.ServeJSON()
 }

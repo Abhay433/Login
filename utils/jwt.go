@@ -76,3 +76,26 @@ func GenerateResetToken() (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
+
+func VerifyRefreshJWT(tokenString string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Ensure the token uses the expected signing method (HS256)
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid signing method")
+		}
+		return jwtSecret, nil
+	})
+
+	// Agar parsing me error aaya toh return karo
+	if err != nil {
+		return nil, err
+	}
+
+	// Agar token valid hai toh claims return karo
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims, nil
+	}
+
+	// Warna expired ya invalid token
+	return nil, errors.New("invalid or expired refresh token")
+}
