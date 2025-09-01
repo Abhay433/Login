@@ -12,7 +12,7 @@ func init() {
 	orm.RegisterDataBase(
 		"default",
 		"postgres",
-		"user=abhay password=abhay@123 dbname=apigo host=127.0.0.1 port=5432 sslmode=disable",
+		"user=abhay password=Abhay@123 dbname=apigo host=127.0.0.1 port=5432 sslmode=disable",
 	)
 }
 

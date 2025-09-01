@@ -8,11 +8,13 @@ import (
 	"login/utils"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"login/dto"
 
 	"github.com/beego/beego/v2/client/orm"
+	"github.com/beego/beego/v2/core/logs"
 	"github.com/beego/beego/v2/server/web"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -25,61 +27,58 @@ type UserController struct {
 func (c *UserController) CreateUser() {
 	var user models.Users
 
-	// ✅ Read the raw body manually
+	// ✅ Read request body
 	body, err := io.ReadAll(c.Ctx.Request.Body)
 	if err != nil {
-		fmt.Println("Error reading body:", err)
-		c.Ctx.Output.SetStatus(http.StatusBadRequest)
-		c.Data["json"] = map[string]string{"error": "Cannot read request body"}
-		c.ServeJSON()
+		c.CustomAbort(http.StatusBadRequest, "Cannot read request body")
 		return
 	}
 
-	fmt.Println("RAW BODY:", string(body))
-
-	// ✅ Decode JSON into struct
+	// ✅ Decode JSON
 	if err := json.Unmarshal(body, &user); err != nil {
-		fmt.Println("JSON Unmarshal Error:", err)
-		c.Ctx.Output.SetStatus(http.StatusBadRequest)
-		c.Data["json"] = map[string]string{"error": "Invalid JSON format"}
-		c.ServeJSON()
+		c.CustomAbort(http.StatusBadRequest, "Invalid JSON format")
 		return
 	}
-
-	fmt.Println("Parsed User Data:", user)
 
 	// ✅ Validate required fields
-	if user.Name == "" || user.Email == "" || user.Password == "" {
-		c.Ctx.Output.SetStatus(http.StatusBadRequest)
-		c.Data["json"] = map[string]string{"error": "Name, Email, and Password are required"}
-		c.ServeJSON()
+	if strings.TrimSpace(user.Name) == "" || strings.TrimSpace(user.Email) == "" || strings.TrimSpace(user.Password) == "" {
+		c.CustomAbort(http.StatusBadRequest, "Name, Email, and Password are required")
 		return
 	}
 
-	// ✅ Hash password
+	// ✅ STEP 2: Check if user already exists in our DB
+	o := orm.NewOrm()
+	existingUser := models.Users{}
+	err = o.QueryTable("users").Filter("email", user.Email).One(&existingUser)
+	if err == nil {
+		c.CustomAbort(http.StatusConflict, "Email already registered")
+		return
+	} else if err != orm.ErrNoRows {
+		c.CustomAbort(http.StatusInternalServerError, "Database error")
+		return
+	}
+
+	// ✅ STEP 3: Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.Ctx.Output.SetStatus(http.StatusInternalServerError)
-		c.Data["json"] = map[string]string{"error": "Failed to hash password"}
-		c.ServeJSON()
+		c.CustomAbort(http.StatusInternalServerError, "Failed to hash password")
 		return
 	}
 	user.Password = string(hashedPassword)
 
-	// ✅ Save user in database
-	o := orm.NewOrm()
+	// ✅ STEP 4: Insert into DB
 	_, err = o.Insert(&user)
 	if err != nil {
-		fmt.Println("DB Insert Error:", err)
-		c.Ctx.Output.SetStatus(http.StatusInternalServerError)
-		c.Data["json"] = map[string]string{"error": "Failed to create user"}
-		c.ServeJSON()
+		c.CustomAbort(http.StatusInternalServerError, "Failed to create user")
 		return
 	}
 
-	// ✅ Success response
+	// ✅ STEP 5: Success Response
 	c.Ctx.Output.SetStatus(http.StatusCreated)
-	c.Data["json"] = map[string]string{"message": "User created successfully!"}
+	c.Data["json"] = map[string]string{
+		"message": "User created successfully!",
+		"user_id": fmt.Sprintf("%d", user.Id),
+	}
 	c.ServeJSON()
 }
 
@@ -228,65 +227,70 @@ func (c *UserController) DeleteUser() {
 func (c *UserController) Login() {
 	var loginReq dto.UserLoginRequest
 	if err := json.NewDecoder(c.Ctx.Request.Body).Decode(&loginReq); err != nil {
-		c.Ctx.Output.SetStatus(400)
-		c.Data["json"] = map[string]string{"error": "Invalid request body"}
-		c.ServeJSON()
+		c.CustomAbort(400, "Invalid request body")
 		return
 	}
 
 	o := orm.NewOrm()
 	user := models.Users{}
-	err := o.QueryTable("users").Filter("Email", loginReq.Email).One(&user)
+	err := o.QueryTable("users").Filter("email", loginReq.Email).One(&user)
 	if err == orm.ErrNoRows {
-		c.Ctx.Output.SetStatus(401)
-		c.Data["json"] = map[string]string{"error": "Invalid email or password"}
+		// User not found
+		c.Data["json"] = map[string]interface{}{
+			"success": false,
+			"error":   "User not authorized",
+		}
 		c.ServeJSON()
 		return
 	}
 
 	// Compare password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(loginReq.Password)); err != nil {
-		c.Ctx.Output.SetStatus(401)
-		c.Data["json"] = map[string]string{"error": "Invalid email or password"}
+		c.Data["json"] = map[string]interface{}{
+			"success": false,
+			"error":   "User not authorized",
+		}
 		c.ServeJSON()
 		return
 	}
 
-	// Generate Access Token (short-lived)
+	// Generate tokens
 	accessToken, err := utils.GenerateJWT(user.Id)
 	if err != nil {
-		c.Ctx.Output.SetStatus(500)
-		c.Data["json"] = map[string]string{"error": "Failed to generate access token"}
-		c.ServeJSON()
+		c.CustomAbort(500, "Failed to generate access token")
 		return
 	}
 
-	// Generate Refresh Token (long-lived)
-	refreshToken, err := utils.GenerateRefreshJWT(user.Id) // new function
+	refreshToken, err := utils.GenerateRefreshJWT(user.Id)
 	if err != nil {
-		c.Ctx.Output.SetStatus(500)
-		c.Data["json"] = map[string]string{"error": "Failed to generate refresh token"}
-		c.ServeJSON()
+		c.CustomAbort(500, "Failed to generate refresh token")
 		return
 	}
 
-	// Store refresh token in DB
+	// Save refresh token in DB
 	tokenModel := models.RefreshToken{
 		UserId:    user.Id,
 		Token:     refreshToken,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour), // 7 days
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
 	}
 	if _, err := o.Insert(&tokenModel); err != nil {
-		c.Ctx.Output.SetStatus(500)
-		c.Data["json"] = map[string]string{"error": "Failed to save refresh token"}
-		c.ServeJSON()
+		c.CustomAbort(500, "Failed to save refresh token")
 		return
 	}
 
-	// Send response
-	c.Data["json"] = dto.LoginResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
+	// ✅ Set Cookie for Access Token
+	c.Ctx.Output.Header("Set-Cookie", "access_token="+accessToken+"; HttpOnly; Path=/; Max-Age=900")
+
+	// ✅ Set Redirect URL
+	c.Ctx.Output.Header("redirect-url", "http://localhost:3000/hello") // Your app URL
+
+	// ✅ Set 301 Redirect Status
+	c.Ctx.Output.SetStatus(http.StatusMovedPermanently)
+
+	// ✅ Send JSON response
+	c.Data["json"] = map[string]interface{}{
+		"success": true,
+		"message": "Redirecting...",
 	}
 	c.ServeJSON()
 }
@@ -404,9 +408,6 @@ func (c *UserController) ForgotPassword() {
 	}
 	o.Insert(&resetToken)
 
-	// TODO: Send email with token link
-	// e.g., http://localhost:8080/reset-password?token=<token>
-
 	c.Data["json"] = map[string]string{"message": "Password reset link sent to your email"}
 	c.ServeJSON()
 }
@@ -423,26 +424,87 @@ func (c *UserController) ResetPassword() {
 
 	o := orm.NewOrm()
 	resetToken := models.PasswordResetToken{}
+
+	// Step 1: Token Fetch
 	err := o.QueryTable("password_reset_tokens").
 		Filter("token", req.Token).
 		One(&resetToken)
 
-	if err == orm.ErrNoRows || resetToken.ExpiresAt.Before(time.Now()) {
-		c.Ctx.Output.SetStatus(401)
-		c.Data["json"] = map[string]string{"error": "Invalid or expired token"}
+	if err != nil {
+		if err == orm.ErrNoRows {
+			// Token exist nahi karta
+			c.Ctx.Output.SetStatus(401)
+			c.Data["json"] = map[string]string{"error": "Invalid token"}
+		} else {
+			// DB issue ya koi aur error
+			c.Ctx.Output.SetStatus(500)
+			c.Data["json"] = map[string]string{"error": "Something went wrong"}
+		}
 		c.ServeJSON()
 		return
 	}
 
-	user := models.Users{Id: resetToken.UserId}
-	o.Read(&user)
-	hashed, _ := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	// Step 2: Token Expiry Check
+	if resetToken.ExpiresAt.Before(time.Now()) {
+		c.Ctx.Output.SetStatus(401)
+		c.Data["json"] = map[string]string{"error": "Token has expired"}
+		c.ServeJSON()
+		return
+	}
+
+	// Step 3: User Fetch
+	// Step 3: User Fetch (unchanged)
+	user := models.Users{}
+	user.Id = resetToken.UserId
+
+	if err := o.Read(&user); err != nil {
+		c.Ctx.Output.SetStatus(404)
+		c.Data["json"] = map[string]string{"error": "User not found"}
+		c.ServeJSON()
+		return
+	}
+
+	// DEBUG: print current stored hash before update
+	fmt.Println("DEBUG: before update - user id:", user.Id, "stored password:", user.Password)
+
+	// Step 4: New Password Hashing
+	hashed, hashErr := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if hashErr != nil {
+		c.Ctx.Output.SetStatus(500)
+		c.Data["json"] = map[string]string{"error": "Failed to hash password"}
+		c.ServeJSON()
+		return
+	}
 	user.Password = string(hashed)
-	o.Update(&user)
 
-	// Optionally delete token after use
-	o.Delete(&resetToken)
+	// Step 5: Password Update
+	if _, updateErr := o.Update(&user, "Password"); updateErr != nil {
+		c.Ctx.Output.SetStatus(500)
+		c.Data["json"] = map[string]string{"error": "Failed to update password"}
+		c.ServeJSON()
+		return
+	}
 
+	// DEBUG: read back and verify
+	updatedUser := models.Users{Id: user.Id}
+	if err := o.Read(&updatedUser); err != nil {
+		fmt.Println("DEBUG: failed to read back updated user:", err)
+	} else {
+		fmt.Println("DEBUG: after update - stored password:", updatedUser.Password)
+		// quick verify - should return nil if match
+		if bcrypt.CompareHashAndPassword([]byte(updatedUser.Password), []byte(req.NewPassword)) == nil {
+			fmt.Println("DEBUG: bcrypt verification SUCCESS for new password")
+		} else {
+			fmt.Println("DEBUG: bcrypt verification FAILED for new password")
+		}
+	}
+
+	// Step 6: Delete Reset Token
+	if _, delErr := o.Delete(&resetToken); delErr != nil {
+		logs.Warn("Failed to delete reset token: ", delErr)
+	}
+
+	// Step 7: Success Response
 	c.Data["json"] = map[string]string{"message": "Password updated successfully"}
 	c.ServeJSON()
 }

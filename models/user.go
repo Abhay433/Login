@@ -6,6 +6,12 @@ import (
 	"github.com/beego/beego/v2/client/orm"
 )
 
+type User struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 func init() {
 	orm.RegisterModel(new(Users), new(RefreshToken))
 	orm.RegisterModel(new(PasswordResetToken))
@@ -45,4 +51,17 @@ type PasswordResetToken struct {
 
 func (p *PasswordResetToken) TableName() string {
 	return "password_reset_tokens"
+}
+
+type RegisterRequest struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// Response struct
+type Response struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
 }
